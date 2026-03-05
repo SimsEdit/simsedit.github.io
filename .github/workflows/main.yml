@@ -1,0 +1,56 @@
+name: Cleanup Inactive Deployments
+
+on:
+  workflow_dispatch:
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete Inactive Deployments
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          REPO: ${{ github.repository }}
+        run: |
+            set +e
+            set -o pipefail
+
+            owner=$(echo "$REPO" | cut -d'/' -f1)
+            repo=$(echo "$REPO" | cut -d'/' -f2)
+
+            deployments_json=$(gh api -H "Accept: application/vnd.github+json" \
+            /repos/$owner/$repo/deployments 2>/dev/null)
+
+            # Validate deployments JSON
+            echo "$deployments_json" | jq empty 2>/dev/null
+            if [ $? -ne 0 ]; then
+            echo "❌ Failed to parse deployments JSON. Skipping cleanup."
+            exit 0  # Don't fail the workflow
+            fi
+
+            echo "$deployments_json" | jq -c '.[]' | while read -r dep; do
+            id=$(echo "$dep" | jq -r '.id' 2>/dev/null)
+            if [ -z "$id" ] || [ "$id" = "null" ]; then
+                echo "⚠️ Skipping deployment due to missing ID."
+                continue
+            fi
+
+            statuses_json=$(gh api -H "Accept: application/vnd.github+json" \
+                /repos/$owner/$repo/deployments/$id/statuses 2>/dev/null)
+
+            echo "$statuses_json" | jq empty 2>/dev/null
+            if [ $? -ne 0 ]; then
+                echo "⚠️ Skipping deployment $id due to invalid statuses JSON."
+                continue
+            fi
+
+            latest_status=$(echo "$statuses_json" | jq -r '.[0].state' 2>/dev/null)
+            if [ "$latest_status" = "inactive" ]; then
+                echo "🗑️ Deleting deployment ID: $id (status: inactive)"
+                gh api -X DELETE -H "Accept: application/vnd.github+json" \
+                /repos/$owner/$repo/deployments/$id
+            else
+                echo "ℹ️ Deployment ID: $id is active or unknown status: $latest_status"
+            fi
+            done
+
